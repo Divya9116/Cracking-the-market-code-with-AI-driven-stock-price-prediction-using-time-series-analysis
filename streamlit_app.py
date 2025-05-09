@@ -16,6 +16,7 @@ import os
 import time
 from datetime import datetime, timedelta
 import logging
+import io
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -26,7 +27,7 @@ np.random.seed(42)
 
 # Cache data fetching to avoid repeated yfinance calls
 @st.cache_data
-def fetch_stock_data(ticker, start_date, end_date, max_retries=3):
+def fetch_stock_data(ticker, start_date, end_date, max_retries=5):
     logger.info(f"Fetching data for {ticker} from {start_date} to {end_date}")
     for attempt in range(max_retries):
         try:
@@ -41,7 +42,7 @@ def fetch_stock_data(ticker, start_date, end_date, max_retries=3):
             return df
         except Exception as e:
             if "Rate limited" in str(e):
-                wait_time = 2 ** attempt * 5
+                wait_time = 2 ** attempt * 10
                 st.warning(f"Rate limit error on attempt {attempt + 1}/{max_retries}. Waiting {wait_time}s...")
                 logger.warning(f"Rate limit error: {e}. Waiting {wait_time}s")
                 time.sleep(wait_time)
@@ -49,8 +50,42 @@ def fetch_stock_data(ticker, start_date, end_date, max_retries=3):
                 st.error(f"Error fetching data from yfinance: {e}")
                 logger.error(f"yfinance error: {e}")
                 break
-    st.error("Failed to fetch data from yfinance. Please try again later.")
+    st.error("Failed to fetch data from yfinance. Please upload a CSV file with stock data.")
     return pd.DataFrame()
+
+# Load and validate CSV data
+def load_csv_data(uploaded_file):
+    try:
+        df = pd.read_csv(uploaded_file)
+        required_columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']
+        if not all(col in df.columns for col in required_columns):
+            st.error(f"CSV must contain columns: {', '.join(required_columns)}")
+            return pd.DataFrame()
+        
+        # Convert Date to datetime and set as index
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        if df['Date'].isna().any():
+            st.error("Invalid date format in CSV. Use YYYY-MM-DD.")
+            return pd.DataFrame()
+        
+        df.set_index('Date', inplace=True)
+        
+        # Validate numeric columns
+        numeric_cols = ['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        if df[numeric_cols].isna().any().any():
+            st.error("Non-numeric values found in numeric columns.")
+            return pd.DataFrame()
+        
+        df = df.sort_index()
+        st.write(f"Loaded {len(df)} rows from CSV")
+        logger.info(f"Loaded {len(df)} rows from CSV")
+        return df
+    except Exception as e:
+        st.error(f"Error loading CSV: {e}")
+        logger.error(f"CSV loading error: {e}")
+        return pd.DataFrame()
 
 # Data Preprocessing
 def preprocess_data(df):
@@ -233,12 +268,27 @@ def main():
     forecast_days = st.sidebar.slider("Forecast Days", min_value=1, max_value=60, value=30)
     look_back = st.sidebar.slider("LSTM Look Back Period", min_value=5, max_value=50, value=20)
     
+    # Data Source Selection
+    st.sidebar.header("Data Source")
+    use_yfinance = st.sidebar.checkbox("Use yfinance (default)", value=True)
+    uploaded_file = None
+    if not use_yfinance:
+        st.sidebar.write("Upload a CSV file with columns: Date (YYYY-MM-DD), Open, High, Low, Close, Adj Close, Volume")
+        uploaded_file = st.sidebar.file_uploader("Choose a CSV file", type="csv")
+    
     if st.sidebar.button("Run Analysis"):
         with st.spinner("Fetching and processing data..."):
             # Fetch Data
-            df = fetch_stock_data(ticker, start_date, end_date)
+            df = pd.DataFrame()
+            if use_yfinance:
+                df = fetch_stock_data(ticker, start_date, end_date)
+            if df.empty and uploaded_file is not None:
+                st.write("yfinance failed or not selected. Loading data from CSV...")
+                df = load_csv_data(uploaded_file)
+            
             if df.empty:
-                st.error("Exiting: No data available after fetching")
+                st.error("Exiting: No data available from yfinance or CSV. Please check your inputs or upload a valid CSV.")
+                st.write("CSV should have columns: Date (YYYY-MM-DD), Open, High, Low, Close, Adj Close, Volume")
                 return
             
             # Preprocess and Engineer Features
@@ -338,7 +388,7 @@ def main():
                 ax.plot(future_dates, arima_future, label='ARIMA Forecast')
             if lstm_future.size > 0:
                 ax.plot(future_dates, lstm_future, label='LSTM Forecast')
-            ax.set_title(f'{ticker} Stock Price Forecast (Next {forecast_days} Days)')
+            ax.set_title(f'Stock Price Forecast (Next {forecast_days} Days)')
             ax.set_xlabel('Date')
             ax.set_ylabel('Price')
             ax.legend()
