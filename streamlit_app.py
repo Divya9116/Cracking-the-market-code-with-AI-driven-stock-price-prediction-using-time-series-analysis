@@ -11,11 +11,15 @@ from statsmodels.tsa.arima.model import ARIMA
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from sklearn.preprocessing import MinMaxScaler
-import plotly.express as px
 import yfinance as yf
 import os
 import time
 from datetime import datetime, timedelta
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Set random seed for reproducibility
 np.random.seed(42)
@@ -23,6 +27,7 @@ np.random.seed(42)
 # Cache data fetching to avoid repeated yfinance calls
 @st.cache_data
 def fetch_stock_data(ticker, start_date, end_date, max_retries=3):
+    logger.info(f"Fetching data for {ticker} from {start_date} to {end_date}")
     for attempt in range(max_retries):
         try:
             df = yf.download(ticker, start=start_date, end=end_date, auto_adjust=False)
@@ -32,14 +37,17 @@ def fetch_stock_data(ticker, start_date, end_date, max_retries=3):
             df.index = pd.to_datetime(df.index)
             df = df.loc[start_date:end_date]
             st.write(f"Loaded {len(df)} rows from yfinance")
+            logger.info(f"Loaded {len(df)} rows for {ticker}")
             return df
         except Exception as e:
             if "Rate limited" in str(e):
                 wait_time = 2 ** attempt * 5
                 st.warning(f"Rate limit error on attempt {attempt + 1}/{max_retries}. Waiting {wait_time}s...")
+                logger.warning(f"Rate limit error: {e}. Waiting {wait_time}s")
                 time.sleep(wait_time)
             else:
                 st.error(f"Error fetching data from yfinance: {e}")
+                logger.error(f"yfinance error: {e}")
                 break
     st.error("Failed to fetch data from yfinance. Please try again later.")
     return pd.DataFrame()
@@ -48,6 +56,7 @@ def fetch_stock_data(ticker, start_date, end_date, max_retries=3):
 def preprocess_data(df):
     if df.empty:
         st.warning("Input DataFrame is empty")
+        logger.warning("Empty DataFrame in preprocess_data")
         return df
     df = df.ffill().dropna()
     df = df.drop_duplicates()
@@ -59,12 +68,14 @@ def preprocess_data(df):
     df = df.sort_index()
     df.index = df.index.to_period('D').to_timestamp()
     st.write(f"After preprocessing: {len(df)} rows")
+    logger.info(f"After preprocessing: {len(df)} rows")
     return df
 
 # Feature Engineering
 def engineer_features(df):
     if df.empty:
         st.warning("Input DataFrame is empty for feature engineering")
+        logger.warning("Empty DataFrame in engineer_features")
         return df
     df['SMA_20'] = df['Close'].rolling(window=20).mean()
     df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
@@ -80,6 +91,7 @@ def engineer_features(df):
     df['Volume_Ratio'] = df['Volume'] / df['Volume'].rolling(window=5).mean()
     df = df.dropna()
     st.write(f"After feature engineering: {len(df)} rows")
+    logger.info(f"After feature engineering: {len(df)} rows")
     return df
 
 def compute_rsi(data, periods=14):
@@ -93,6 +105,7 @@ def compute_rsi(data, periods=14):
 def perform_eda(df, save_path='outputs/eda_plots'):
     if df.empty:
         st.warning("Cannot perform EDA: DataFrame is empty")
+        logger.warning("Empty DataFrame in perform_eda")
         return
     os.makedirs(save_path, exist_ok=True)
     
@@ -126,9 +139,16 @@ def perform_eda(df, save_path='outputs/eda_plots'):
 
 # Model Building and Evaluation
 def train_arima_model(data, order=(5,1,0)):
-    model = ARIMA(data, order=order)
-    model_fit = model.fit()
-    return model_fit
+    try:
+        logger.info("Training ARIMA model")
+        model = ARIMA(data, order=order)
+        model_fit = model.fit()
+        logger.info("ARIMA model trained successfully")
+        return model_fit
+    except Exception as e:
+        st.error(f"ARIMA training failed: {e}")
+        logger.error(f"ARIMA training failed: {e}")
+        return None
 
 def prepare_lstm_data(data, look_back=20):
     scaler = MinMaxScaler(feature_range=(0, 1))
@@ -144,20 +164,34 @@ def prepare_lstm_data(data, look_back=20):
     return X, y, scaler
 
 def train_lstm_model(X_train, y_train, look_back=20):
-    model = Sequential()
-    model.add(LSTM(units=50, return_sequences=True, input_shape=(look_back, 1)))
-    model.add(Dropout(0.2))
-    model.add(LSTM(units=50))
-    model.add(Dropout(0.2))
-    model.add(Dense(units=1))
-    model.compile(optimizer='adam', loss='mean_squared_error')
-    model.fit(X_train, y_train, epochs=20, batch_size=32, verbose=0)
-    return model
+    try:
+        logger.info("Training LSTM model")
+        model = Sequential()
+        model.add(LSTM(units=50, return_sequences=True, input_shape=(look_back, 1)))
+        model.add(Dropout(0.2))
+        model.add(LSTM(units=50))
+        model.add(Dropout(0.2))
+        model.add(Dense(units=1))
+        model.compile(optimizer='adam', loss='mean_squared_error')
+        model.fit(X_train, y_train, epochs=20, batch_size=32, verbose=0)
+        logger.info("LSTM model trained successfully")
+        return model
+    except Exception as e:
+        st.error(f"LSTM training failed: {e}")
+        logger.error(f"LSTM training failed: {e}")
+        return None
 
 def train_random_forest_model(X_train, y_train):
-    model = RandomForestRegressor(n_estimators=100, random_state=42)
-    model.fit(X_train, y_train)
-    return model
+    try:
+        logger.info("Training Random Forest model")
+        model = RandomForestRegressor(n_estimators=100, random_state=42)
+        model.fit(X_train, y_train)
+        logger.info("Random Forest model trained successfully")
+        return model
+    except Exception as e:
+        st.error(f"Random Forest training failed: {e}")
+        logger.error(f"Random Forest training failed: {e}")
+        return None
 
 def evaluate_model(y_true, y_pred):
     mae = mean_absolute_error(y_true, y_pred)
@@ -167,6 +201,8 @@ def evaluate_model(y_true, y_pred):
 
 # Forecasting Function
 def forecast_future(model, data, steps, scaler=None, look_back=20, is_lstm=False):
+    if model is None:
+        return np.array([])
     if is_lstm:
         last_sequence = data[-look_back:].values.reshape(-1, 1)
         last_sequence = scaler.transform(last_sequence)
@@ -243,13 +279,13 @@ def main():
             with st.spinner("Training models..."):
                 # Random Forest
                 rf_model = train_random_forest_model(X_train, y_train)
-                rf_pred = rf_model.predict(X_test)
-                rf_metrics = evaluate_model(y_test, rf_pred)
+                rf_pred = rf_model.predict(X_test) if rf_model else np.array([])
+                rf_metrics = evaluate_model(y_test, rf_pred) if rf_pred.size > 0 else (float('inf'), float('inf'), float('inf'))
                 
                 # ARIMA
                 arima_model = train_arima_model(y_train)
-                arima_pred = arima_model.forecast(steps=len(y_test))
-                arima_metrics = evaluate_model(y_test.values, arima_pred)
+                arima_pred = arima_model.forecast(steps=len(y_test)) if arima_model else np.array([])
+                arima_metrics = evaluate_model(y_test.values, arima_pred) if arima_pred.size > 0 else (float('inf'), float('inf'), float('inf'))
                 
                 # LSTM
                 lstm_X, lstm_y, scaler = prepare_lstm_data(y, look_back)
@@ -261,17 +297,23 @@ def main():
                     lstm_X_train, lstm_X_test, lstm_y_train, lstm_y_test = train_test_split(
                         lstm_X, lstm_y, test_size=0.2, shuffle=False)
                     lstm_model = train_lstm_model(lstm_X_train, lstm_y_train, look_back)
-                    lstm_pred = lstm_model.predict(lstm_X_test)
-                    lstm_pred = scaler.inverse_transform(lstm_pred)
-                    lstm_y_test = scaler.inverse_transform([lstm_y_test])
-                    lstm_metrics = evaluate_model(lstm_y_test.T, lstm_pred)
+                    if lstm_model:
+                        lstm_pred = lstm_model.predict(lstm_X_test)
+                        lstm_pred = scaler.inverse_transform(lstm_pred)
+                        lstm_y_test = scaler.inverse_transform([lstm_y_test])
+                        lstm_metrics = evaluate_model(lstm_y_test.T, lstm_pred)
+                    else:
+                        lstm_metrics = (float('inf'), float('inf'), float('inf'))
+                        lstm_pred = np.array([])
             
             # Test Set Predictions Plot
             st.header("Test Set Predictions")
             fig, ax = plt.subplots(figsize=(14, 7))
             ax.plot(y_test.index, y_test, label='Actual')
-            ax.plot(y_test.index, rf_pred, label='Random Forest')
-            ax.plot(y_test.index, arima_pred, label='ARIMA')
+            if rf_pred.size > 0:
+                ax.plot(y_test.index, rf_pred, label='Random Forest')
+            if arima_pred.size > 0:
+                ax.plot(y_test.index, arima_pred, label='ARIMA')
             if lstm_pred.size > 0:
                 ax.plot(y_test.index[-len(lstm_pred):], lstm_pred, label='LSTM')
             ax.set_title('Stock Price Predictions (Test Set)')
@@ -286,13 +328,14 @@ def main():
             with st.spinner("Generating future forecasts..."):
                 future_dates = pd.date_range(start=end_date, periods=forecast_days + 1, freq='D')[1:]
                 arima_future = forecast_future(arima_model, y, forecast_days)
-                lstm_future = forecast_future(lstm_model, y, forecast_days, scaler, look_back, is_lstm=True) if lstm_X is not None else np.array([])
+                lstm_future = forecast_future(lstm_model, y, forecast_days, scaler, look_back, is_lstm=True) if lstm_X is not None and lstm_model else np.array([])
             
             # Future Forecast Plot
             st.header(f"Future Forecast (Next {forecast_days} Days)")
             fig, ax = plt.subplots(figsize=(14, 7))
             ax.plot(y.index[-60:], y[-60:], label='Historical Close')
-            ax.plot(future_dates, arima_future, label='ARIMA Forecast')
+            if arima_future.size > 0:
+                ax.plot(future_dates, arima_future, label='ARIMA Forecast')
             if lstm_future.size > 0:
                 ax.plot(future_dates, lstm_future, label='LSTM Forecast')
             ax.set_title(f'{ticker} Stock Price Forecast (Next {forecast_days} Days)')
@@ -318,7 +361,7 @@ def main():
             st.header("Future Forecast Data")
             forecast_df = pd.DataFrame({
                 'Date': future_dates,
-                'ARIMA_Forecast': arima_future,
+                'ARIMA_Forecast': arima_future if arima_future.size > 0 else [np.nan] * forecast_days,
                 'LSTM_Forecast': lstm_future if lstm_future.size > 0 else [np.nan] * forecast_days
             })
             st.dataframe(forecast_df)
